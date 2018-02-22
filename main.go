@@ -6,7 +6,11 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
+	"io/ioutil"
+	"log"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/hraban/opus"
@@ -19,7 +23,9 @@ func main() {
 	var channels = flag.Int("channel", 1, "the number of chanels the opus was recorded with")
 	var sampleRate = flag.Int("sr", 16000, "the sample rate the audio was recorded with")
 	var fileName = flag.String("f", "", "the opus file to be decoded")
-	var outFileName = flag.String("o", "out.pcm", "the name of the file to write to")
+	var outFileName = flag.String("o", "out.pcm", "the name of the file to write to. If writing to stdout as base64, still use this flag to specify type")
+	var isBase64 = flag.Bool("b64", false, "prints the output data as a base64 encoded string to stdout")
+
 	flag.Parse()
 
 	if *fileName == "" {
@@ -49,15 +55,67 @@ func main() {
 		pcmData.Write(int16ToByteSlice(pcm[:n]))
 	}
 
-	// Open the file we are going to write to
+	// Check if the out format is raw pcm
+	format := strings.Split(*outFileName, ".")[1]
+
+	// If we are not generating raw data we need to go through a conversion process
+	// from pcm to mp3, wav, opus, etc. using ffmpeg
+	if format != "pcm" {
+		// First we create a temporary directory to write the raw data to
+		tmpF, err := ioutil.TempFile("", "raw_recording_data")
+		if err != nil {
+			fmt.Println("could not write to out file")
+			log.Fatal(err)
+		}
+		defer os.Remove(tmpF.Name())
+		tmpF.Write(pcmData.Bytes())
+		tmpF.Close()
+
+		tmpOutF, err := ioutil.TempFile("", "conversion_data")
+		defer os.Remove(tmpOutF.Name())
+
+		stderr := bytes.Buffer{}
+		stdout := bytes.Buffer{}
+		cmd := exec.Command("ffmpeg", "-f", "s16le", "-ar", strconv.Itoa(*sampleRate/1000)+"k", "-i", tmpF.Name(), "-y", "-f", format, tmpOutF.Name())
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err = cmd.Start()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		err = cmd.Wait()
+		if err != nil {
+			fmt.Println(stdout.String())
+			fmt.Println(stderr.String())
+			fmt.Println("could not convert file to type ", format, ":", err)
+			return
+		}
+		tmpOutF.Close()
+
+		data, err := ioutil.ReadFile(tmpOutF.Name())
+		if err != nil {
+			fmt.Println("trouble converting file to type ", format, " and saving file")
+		}
+		pcmData = bytes.Buffer{}
+		pcmData.Write(data)
+	}
+	// At this point pcmData has the data of the file that we want. We will now either
+	// write that data to a file or to stdout as base64
+
+	if *isBase64 {
+		b64str := base64.StdEncoding.EncodeToString(pcmData.Bytes())
+		fmt.Println(b64str)
+		return
+	}
+
 	outF, err := os.Create(*outFileName)
 	if err != nil {
-		fmt.Println("could not write to out file")
+		fmt.Println("could not save to file ", *outFileName, ":", err)
 		return
 	}
 	defer outF.Close()
 
-	// Write collected data to the file
 	outF.Write(pcmData.Bytes())
 }
 
